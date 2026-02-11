@@ -602,27 +602,40 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
             }
         }
 
-        const resultsUrl = replacerURL + `/batches/${r.id}/results`
         const statusUrl = replacerURL + `/batches/${r.id}`
+        const resultsUrl = replacerURL + `/batches/${r.id}/results`
+        const cancelUrl = replacerURL + `/batches/${r.id}/cancel`
 
-        let received = false
-        while(!received){
+        const batchStartTime = Date.now()
+        const BATCH_TIMEOUT = 24 * 60 * 60 * 1000 + 600 * 1000 // 24 hours + 10 minutes
+        let cancelRequested = false
+        
+        while(true){
             try {
                 await sleep(3000)
-                if(arg?.abortSignal?.aborted){
+                if(arg?.abortSignal?.aborted && !cancelRequested){
+                    cancelRequested = true
+                    try {
+                        await fetchNative(cancelUrl, {
+                            "body": "{}",
+                            "method": "POST",
+                            "headers": headers,
+                        })
+                    } catch(e) {
+                        // ignore cancel request errors
+                    }
+                }
+                if(Date.now() - batchStartTime > BATCH_TIMEOUT){
                     return {
                         type: 'fail',
-                        result: 'Request aborted'
+                        result: 'Claude batch request timed out after 24 hours'
                     }
                 }
 
                 const statusRes = await fetchNative(statusUrl, {
                     "method": "GET",
-                    "headers": {
-                        "x-api-key": apiKey,
-                        "anthropic-version": "2023-06-01",
-                    },
-                    "signal": arg.abortSignal,
+                    "headers": headers,
+                    "signal": cancelRequested ? undefined : arg.abortSignal,
                 })
 
                 if(statusRes.status !== 200){
@@ -640,11 +653,8 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
 
                 const batchRes = await fetchNative(resultsUrl, {
                     "method": "GET",
-                    "headers": {
-                        "x-api-key": apiKey,
-                        "anthropic-version": "2023-06-01",
-                    },
-                    "signal": arg.abortSignal,
+                    "headers": headers,
+                    "signal": cancelRequested ? undefined : arg.abortSignal,
                 })
 
                 if(batchRes.status !== 200){
@@ -666,15 +676,60 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                     const type = batchData?.result?.type
                     console.log('Claude batch result type:', type)
                     if(batchData?.result?.type === 'succeeded'){
+                        const contents = batchData.result.message.content ?? []
+                        let resText = ''
+                        let thinking = false
+                        for(const content of contents){
+                            if(content.type === 'text'){
+                                if(thinking){
+                                    resText += "</Thoughts>\n\n"
+                                    thinking = false
+                                }
+                                resText += content.text
+                            }
+                            if(content.type === 'thinking'){
+                                if(!thinking){
+                                    resText += "<Thoughts>\n"
+                                    thinking = true
+                                }
+                                resText += content.thinking ?? ''
+                            }
+                            if(content.type === 'redacted_thinking'){
+                                if(!thinking){
+                                    resText += "<Thoughts>\n"
+                                    thinking = true
+                                }
+                                resText += '\n{{redacted_thinking}}\n'
+                                resText += "</Thoughts>\n\n<Thoughts>\n"
+                            }
+                        }
+                        
+                        if(thinking){
+                            resText += "</Thoughts>\n\n"
+                            thinking = false
+                        }
+
                         return {
                             type: 'success',
-                            result: batchData.result.message.content?.[0]?.text ?? ''
+                            result: resText
                         }
                     }
                     if(batchData?.result?.type === 'errored'){
                         return {
                             type: 'fail',
                             result:  JSON.stringify(batchData.result.error),
+                        }
+                    }
+                    if(batchData?.result?.type === 'canceled'){
+                        return {
+                            type: 'fail',
+                            result: 'Claude batch request was canceled',
+                        }
+                    }
+                    if(batchData?.result?.type === 'expired'){
+                        return {
+                            type: 'fail',
+                            result: 'Claude batch request expired',
                         }
                     }
                 }   
