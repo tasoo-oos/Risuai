@@ -629,8 +629,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                             }
                         }
                         if(Date.now() - batchStartTime > BATCH_TIMEOUT){
-                            controller.enqueue({ "0": "Error: Claude batch request timed out after 24 hours" })
-                            controller.close()
+                            controller.error(new Error('Claude batch request timed out after 24 hours'))
                             return
                         }
 
@@ -641,8 +640,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                         })
 
                         if(statusRes.status !== 200){
-                            controller.enqueue({ "0": "Error: " + await textifyReadableStream(statusRes.body) })
-                            controller.close()
+                            controller.error(new Error(await textifyReadableStream(statusRes.body)))
                             return
                         }
 
@@ -659,8 +657,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                         })
 
                         if(batchRes.status !== 200){
-                            controller.enqueue({ "0": "Error: " + await textifyReadableStream(batchRes.body) })
-                            controller.close()
+                            controller.error(new Error(await textifyReadableStream(batchRes.body)))
                             return
                         }
 
@@ -713,8 +710,13 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                                 return
                             }
                             if(batchData?.result?.type === 'errored'){
-                                controller.enqueue({ "0": "Error: " + JSON.stringify(batchData.result.error) })
-                                controller.close()
+                                const batchError = batchData.result.error
+
+                                const message = batchError?.error?.message ? 
+                                `${batchError.error.type}: ${batchError.error.message}` : 
+                                JSON.stringify(batchError)
+
+                                controller.error(new Error(message))
                                 return
                             }
                             if(batchData?.result?.type === 'canceled'){
@@ -722,8 +724,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                                 return
                             }
                             if(batchData?.result?.type === 'expired'){
-                                controller.enqueue({ "0": "Error: Claude batch request expired" })
-                                controller.close()
+                                controller.error(new Error('Claude batch request expired'))
                                 return
                             }
                         }
@@ -772,6 +773,8 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
         let breakError = ''
         let thinking = false
 
+        // Streaming is used in order to apply successful response even after abortSignal is fired
+        // In order to do otherwise, `request.ts` and `index.svelte.ts` should be edited to bypass abort signal check
         const stream = new ReadableStream<StreamResponseChunk>({
             async start(controller){
                 let text = ''
