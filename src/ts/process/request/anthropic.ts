@@ -605,137 +605,138 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         const statusUrl = replacerURL + `/batches/${r.id}`
         const resultsUrl = replacerURL + `/batches/${r.id}/results`
         const cancelUrl = replacerURL + `/batches/${r.id}/cancel`
+        const abortSignal = arg.abortSignal
 
-        const batchStartTime = Date.now()
-        const BATCH_TIMEOUT = 24 * 60 * 60 * 1000 + 600 * 1000 // 24 hours + 10 minutes
-        let cancelRequested = false
-        
-        while(true){
-            try {
-                await sleep(3000)
-                if(arg?.abortSignal?.aborted && !cancelRequested){
-                    cancelRequested = true
+        const stream = new ReadableStream<StreamResponseChunk>({
+            async start(controller){
+                const batchStartTime = Date.now()
+                const BATCH_TIMEOUT = 24 * 60 * 60 * 1000 + 600 * 1000 // 24 hours + 10 minutes
+                let cancelRequested = false
+
+                while(true){
                     try {
-                        await fetchNative(cancelUrl, {
-                            "body": "{}",
-                            "method": "POST",
+                        await sleep(3000)
+                        if(abortSignal?.aborted && !cancelRequested){
+                            cancelRequested = true
+                            try {
+                                await fetchNative(cancelUrl, {
+                                    "body": "{}",
+                                    "method": "POST",
+                                    "headers": headers,
+                                })
+                            } catch(e) {
+                                // ignore cancel request errors
+                            }
+                        }
+                        if(Date.now() - batchStartTime > BATCH_TIMEOUT){
+                            controller.enqueue({ "0": "Error: Claude batch request timed out after 24 hours" })
+                            controller.close()
+                            return
+                        }
+
+                        const statusRes = await fetchNative(statusUrl, {
+                            "method": "GET",
                             "headers": headers,
+                            "signal": cancelRequested ? undefined : abortSignal,
                         })
-                    } catch(e) {
-                        // ignore cancel request errors
-                    }
-                }
-                if(Date.now() - batchStartTime > BATCH_TIMEOUT){
-                    return {
-                        type: 'fail',
-                        result: 'Claude batch request timed out after 24 hours'
-                    }
-                }
 
-                const statusRes = await fetchNative(statusUrl, {
-                    "method": "GET",
-                    "headers": headers,
-                    "signal": cancelRequested ? undefined : arg.abortSignal,
-                })
+                        if(statusRes.status !== 200){
+                            controller.enqueue({ "0": "Error: " + await textifyReadableStream(statusRes.body) })
+                            controller.close()
+                            return
+                        }
 
-                if(statusRes.status !== 200){
-                    return {
-                        type: 'fail',
-                        result: await textifyReadableStream(statusRes.body)
-                    }
-                }
+                        const statusData = await statusRes.json()
 
-                const statusData = await statusRes.json()
+                        if(statusData.processing_status !== 'ended'){
+                            continue
+                        }
 
-                if(statusData.processing_status !== 'ended'){
-                    continue
-                }
+                        const batchRes = await fetchNative(resultsUrl, {
+                            "method": "GET",
+                            "headers": headers,
+                            "signal": cancelRequested ? undefined : abortSignal,
+                        })
 
-                const batchRes = await fetchNative(resultsUrl, {
-                    "method": "GET",
-                    "headers": headers,
-                    "signal": cancelRequested ? undefined : arg.abortSignal,
-                })
+                        if(batchRes.status !== 200){
+                            controller.enqueue({ "0": "Error: " + await textifyReadableStream(batchRes.body) })
+                            controller.close()
+                            return
+                        }
 
-                if(batchRes.status !== 200){
-                    return {
-                        type: 'fail',
-                        result: await textifyReadableStream(batchRes.body)
-                    }
-                }
+                        //since jsonl
+                        const batchTextData = (await batchRes.text()).split('\n').filter((v) => v.trim() !== ''). map((v) => {
+                            try {
+                                return JSON.parse(v)
+                            } catch (error) {
+                                return null
+                            }
+                        }).filter((v) => v !== null)
+                        for(const batchData of batchTextData){
+                            const type = batchData?.result?.type
+                            console.log('Claude batch result type:', type)
+                            if(batchData?.result?.type === 'succeeded'){
+                                const contents = batchData.result.message.content ?? []
+                                let resText = ''
+                                let thinking = false
+                                for(const content of contents){
+                                    if(content.type === 'text'){
+                                        if(thinking){
+                                            resText += "</Thoughts>\n\n"
+                                            thinking = false
+                                        }
+                                        resText += content.text
+                                    }
+                                    if(content.type === 'thinking'){
+                                        if(!thinking){
+                                            resText += "<Thoughts>\n"
+                                            thinking = true
+                                        }
+                                        resText += content.thinking ?? ''
+                                    }
+                                    if(content.type === 'redacted_thinking'){
+                                        if(!thinking){
+                                            resText += "<Thoughts>\n"
+                                            thinking = true
+                                        }
+                                        resText += '\n{{redacted_thinking}}\n'
+                                    }
+                                }
 
-                //since jsonl
-                const batchTextData = (await batchRes.text()).split('\n').filter((v) => v.trim() !== ''). map((v) => {
-                    try {
-                        return JSON.parse(v)
-                    } catch (error) {
-                        return null
-                    }
-                }).filter((v) => v !== null)
-                for(const batchData of batchTextData){
-                    const type = batchData?.result?.type
-                    console.log('Claude batch result type:', type)
-                    if(batchData?.result?.type === 'succeeded'){
-                        const contents = batchData.result.message.content ?? []
-                        let resText = ''
-                        let thinking = false
-                        for(const content of contents){
-                            if(content.type === 'text'){
                                 if(thinking){
                                     resText += "</Thoughts>\n\n"
                                     thinking = false
                                 }
-                                resText += content.text
-                            }
-                            if(content.type === 'thinking'){
-                                if(!thinking){
-                                    resText += "<Thoughts>\n"
-                                    thinking = true
-                                }
-                                resText += content.thinking ?? ''
-                            }
-                            if(content.type === 'redacted_thinking'){
-                                if(!thinking){
-                                    resText += "<Thoughts>\n"
-                                    thinking = true
-                                }
-                                resText += '\n{{redacted_thinking}}\n'
-                                resText += "</Thoughts>\n\n<Thoughts>\n"
-                            }
-                        }
-                        
-                        if(thinking){
-                            resText += "</Thoughts>\n\n"
-                            thinking = false
-                        }
 
-                        return {
-                            type: 'success',
-                            result: resText
+                                controller.enqueue({ "0": resText })
+                                controller.close()
+                                return
+                            }
+                            if(batchData?.result?.type === 'errored'){
+                                controller.enqueue({ "0": "Error: " + JSON.stringify(batchData.result.error) })
+                                controller.close()
+                                return
+                            }
+                            if(batchData?.result?.type === 'canceled'){
+                                controller.close()
+                                return
+                            }
+                            if(batchData?.result?.type === 'expired'){
+                                controller.enqueue({ "0": "Error: Claude batch request expired" })
+                                controller.close()
+                                return
+                            }
                         }
+                    } catch (error) {
+                        console.error('Error while waiting for Claude batch results:', error)
                     }
-                    if(batchData?.result?.type === 'errored'){
-                        return {
-                            type: 'fail',
-                            result:  JSON.stringify(batchData.result.error),
-                        }
-                    }
-                    if(batchData?.result?.type === 'canceled'){
-                        return {
-                            type: 'fail',
-                            result: 'Claude batch request was canceled',
-                        }
-                    }
-                    if(batchData?.result?.type === 'expired'){
-                        return {
-                            type: 'fail',
-                            result: 'Claude batch request expired',
-                        }
-                    }
-                }   
-            } catch (error) {
-                console.error('Error while waiting for Claude batch results:', error)
+                }
             }
+        })
+
+        return {
+            type: 'streaming',
+            result: stream
         }
     }
     
