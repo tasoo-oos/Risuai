@@ -671,6 +671,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
                                 return null
                             }
                         }).filter((v) => v !== null)
+                        
                         for(const batchData of batchTextData){
                             const type = batchData?.result?.type
                             console.log('Claude batch result type:', type)
