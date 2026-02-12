@@ -607,6 +607,8 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         const cancelUrl = replacerURL + `/batches/${r.id}/cancel`
         const abortSignal = arg.abortSignal
 
+        // Streaming is used in batch API to apply successful response even after abortSignal is fired
+        // In order to do otherwise, `request.ts` and `index.svelte.ts` should be edited to bypass abort signal check
         const stream = new ReadableStream<StreamResponseChunk>({
             async start(controller){
                 const batchStartTime = Date.now()
@@ -773,8 +775,6 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
         let breakError = ''
         let thinking = false
 
-        // Streaming is used in order to apply successful response even after abortSignal is fired
-        // In order to do otherwise, `request.ts` and `index.svelte.ts` should be edited to bypass abort signal check
         const stream = new ReadableStream<StreamResponseChunk>({
             async start(controller){
                 let text = ''
