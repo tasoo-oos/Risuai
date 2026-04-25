@@ -367,6 +367,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         // Adaptive thinking mode
         delete body.thinking
         body.thinking = { type: 'adaptive', display: 'summarized' }
+        
         let effort = db.adaptiveThinkingEffort ?? 'high'
         if(effort === 'xhigh' && !arg.modelInfo.flags.includes(LLMFlags.claudeXHighEffort)){
             effort = 'high'
