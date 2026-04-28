@@ -53,6 +53,10 @@
         totalPages?: number;
         isComment?: boolean;
         disabled?: boolean | 'allBefore';
+        isLastAssistantMessage?: boolean;
+        onEdit?: (idx: number, data: string) => void;
+        onDeleteReroll?: (idx: number) => void;
+        canDeleteReroll?: (idx: number) => boolean;
     }
 
     let {
@@ -75,6 +79,10 @@
         totalPages = 1,
         isComment = false,
         disabled = false,
+        isLastAssistantMessage = false,
+        onEdit = () => {},
+        onDeleteReroll = () => {},
+        canDeleteReroll = () => false,
     }: Props = $props();
 
     let msgDisplay = $state('')
@@ -110,14 +118,32 @@
         }
     }
 
+    async function deleteReroll(){
+        if(idx < 0){
+            return
+        }
+        const remove = DBState.db.askRemoval ? await alertConfirm(language.deleteRerollMessageConfirm) : true
+        if(remove){
+            onDeleteReroll(idx)
+        }
+    }
+
+    function saveMessageData(data:string){
+        if(idx < 0){
+            return
+        }
+        DBState.db.characters[selIdState.selId].chats[DBState.db.characters[selIdState.selId].chatPage].message[idx].data = data
+        onEdit(idx, data)
+    }
+
     async function edit(){
-        DBState.db.characters[selIdState.selId].chats[DBState.db.characters[selIdState.selId].chatPage].message[idx].data = message
+        saveMessageData(message)
     }
 
     function handlePartialEditSave(e: CustomEvent<{ newData: string }>) {
         if (idx >= 0) {
             message = e.detail.newData
-            DBState.db.characters[selIdState.selId].chats[DBState.db.characters[selIdState.selId].chatPage].message[idx].data = e.detail.newData
+            saveMessageData(e.detail.newData)
             displaya(e.detail.newData)
         }
     }
@@ -729,6 +755,15 @@
                 <span class="ml-1">{language.remove}</span>
             {/if}
         </button>
+        {#if role !== 'user' && isLastAssistantMessage && canDeleteReroll(idx)}
+            <button class="flex items-center hover:text-blue-500 transition-colors button-icon-remove-reroll" onclick={deleteReroll}>
+                <TrashIcon size={20}/>
+
+                {#if showNames}
+                    <span class="ml-1">{language.deleteRerollMessage}</span>
+                {/if}
+            </button>
+        {/if}
     {/if}
 {/if}
 {/snippet}
@@ -764,7 +799,7 @@
 {/snippet}
 
 {#snippet rerolls()}
-    {#if rerollIcon || altGreeting}
+    {#if (rerollIcon && role !== 'user' && isLastAssistantMessage) || altGreeting}
         {#if DBState.db.swipe || altGreeting}
             <button class="flex items-center hover:text-blue-500 transition-colors button-icon-unreroll" class:dyna-icon={rerollIcon === 'dynamic'} onclick={unReroll}>
                 <ArrowLeft size={22}/>
@@ -816,7 +851,11 @@
         const newChat = $state.snapshot(currentChat)
         newChat.name = createChatCopyName(newChat.name, 'Branch')
         newChat.id = v4()
-        newChat.message = newChat.message.slice(0, idx + 1)
+        newChat.message = newChat.message.slice(0, idx + 1).map((message) => {
+            delete message.swipes
+            delete message.swipeId
+            return message
+        })
         newChat.message.push({
             role: 'char',
             data: '{{specialcomment::branchedfrom::' + currentChat.id + '::' + currentChat.name + '::' + currentMessage.chatId + '::}}',

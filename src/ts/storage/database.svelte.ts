@@ -1799,6 +1799,8 @@ export interface Message{
     otherUser?:boolean
     disabled?:false|true|'allBefore'
     isComment?:boolean
+    swipes?:Message[][]
+    swipeId?:number
 }
 
 export interface MessageGenerationInfo{
