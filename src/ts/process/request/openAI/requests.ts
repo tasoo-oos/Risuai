@@ -155,7 +155,7 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
             if(arg.modelInfo.flags.includes(LLMFlags.deepSeekPrefix) && i === formatedChat.length-1 && formatedChat[i].role === 'assistant'){
                 formatedChat[i].prefix = true
             }
-            if(arg.modelInfo.flags.includes(LLMFlags.deepSeekThinkingInput) && formatedChat[i].thoughts && formatedChat[i].thoughts.length > 0 && formatedChat[i].role === 'assistant'){
+            if(arg.modelInfo.flags.includes(LLMFlags.deepSeekThinkingInput) && i === formatedChat.length-1 && formatedChat[i].thoughts && formatedChat[i].thoughts.length > 0 && formatedChat[i].role === 'assistant'){
                 formatedChat[i].reasoning_content = formatedChat[i].thoughts.join('\n')
             }
             delete formatedChat[i].memo
@@ -1353,6 +1353,18 @@ function wrapToolStream(
             let prefix = ''
             let lastValue
 
+            const extractThoughts = (text:string) => {
+                let reasoningContent = ''
+                const content = text.replace(/<Thoughts>\n?([\s\S]*?)\n?<\/Thoughts>\n*/g, (_, p1:string) => {
+                    reasoningContent += (reasoningContent ? '\n' : '') + p1
+                    return ''
+                })
+                return {
+                    content,
+                    reasoningContent
+                }
+            }
+
             while(true){
                 let {done, value} = await reader.read()
 
@@ -1364,10 +1376,20 @@ function wrapToolStream(
                     const toolCalls = Object.values(JSON.parse(value?.['__tool_calls'] || '{}') || {}) as ToolCall[]; 
                     if(toolCalls && toolCalls.length > 0){
                         const messages = body.messages as OpenAIChatExtra[]
+                        let assistantContent = content
+                        let assistantReasoningContent = ''
+                        const shouldPassDeepSeekReasoning = arg.modelInfo.flags.includes(LLMFlags.deepSeekThinkingInput) ||
+                            (arg.modelInfo.flags.includes(LLMFlags.deepSeekThinkingToggle) && db.deepseekThinkingType === 'enabled')
+
+                        if(shouldPassDeepSeekReasoning){
+                            const extracted = extractThoughts(content)
+                            assistantContent = extracted.content
+                            assistantReasoningContent = extracted.reasoningContent
+                        }
 
                         const assistantMessage: OpenAIChatExtra = {
                             role: 'assistant',
-                            content: (db.simplifiedToolUse ? '' : content),
+                            content: (db.simplifiedToolUse ? '' : assistantContent),
                             tool_calls: toolCalls.map(call => ({
                                 id: call.id,
                                 type: 'function',
@@ -1376,6 +1398,9 @@ function wrapToolStream(
                                     arguments: call.function.arguments
                                 }
                             }))
+                        }
+                        if(assistantReasoningContent){
+                            assistantMessage.reasoning_content = assistantReasoningContent
                         }
 
                         const reasoningContentValue = value?.['__reasoning_content']
