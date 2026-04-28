@@ -11,7 +11,7 @@ import type { MultiModal } from "../index.svelte"
 import { extractJSON } from "../templates/jsonSchema"
 import { callTool, decodeToolCall, encodeToolCall } from "../mcp/mcp"
 import type { RequestDataArgumentExtended, requestDataResponse, StreamResponseChunk } from './request'
-import { applyParameters } from './shared'
+import { applyAdditionalParameters, applyParameters, getAdditionalParameters } from './shared'
 
 interface Claude3TextBlock {
     type: 'text',
@@ -73,6 +73,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
     const db = getDatabase()
     const aiModel = arg.aiModel
     const useStreaming = arg.useStreaming
+    const ollamaCloudAnthropic = aiModel === 'ollama-cloud'
     let replacerURL = arg.customURL ?? ('https://api.anthropic.com/v1/messages')
     let apiKey = arg.key || ((aiModel === 'reverse_proxy') ? db.proxyKey : db.claudeAPIKey)
     const maxTokens = arg.maxTokens
@@ -390,6 +391,10 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
     }
 
     const bedrock = arg.modelInfo.format === LLMFormat.AWSBedrockClaude
+    const additionalParams = getAdditionalParameters(aiModel)
+    const hasCustomAnthropicBeta = additionalParams.some(([key]) => {
+        return key.startsWith('header::') && key.slice('header::'.length).toLocaleLowerCase() === 'anthropic-beta'
+    })
 
     if(bedrock && aiModel !== 'reverse_proxy'){
         function getCredentialParts(key:string) {
@@ -437,16 +442,22 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
             delete params.top_p
         }
 
+        let bedrockHeaders: Record<string, string> = {
+            ["Host"]: host,
+            ["Content-Type"]: "application/json",
+            ["accept"]: "application/json",
+        }
+
+        if(additionalParams.length > 0){
+            params = applyAdditionalParameters(params, bedrockHeaders, additionalParams)
+        }
+
         const rq = new HttpRequest({
             method: "POST",
             protocol: "https:",
             hostname: host,
             path: `/model/${awsModel}/invoke${stream ? "-with-response-stream" : ""}`,
-            headers: {
-              ["Host"]: host,
-              ["Content-Type"]: "application/json",
-              ["accept"]: "application/json",
-            },
+            headers: bedrockHeaders,
             body: JSON.stringify(params),
         });
         
@@ -552,6 +563,11 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         "accept": "application/json",
     }
 
+    if(ollamaCloudAnthropic){
+        headers["Authorization"] = "Bearer " + apiKey
+        delete headers["x-api-key"]
+    }
+
     let betas:string[] = []
 
     if(body.max_tokens > 8192){
@@ -582,6 +598,25 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
 
     }
 
+    if(additionalParams.length > 0){
+        body = applyAdditionalParameters(body, headers, additionalParams)
+    }
+
+    let betas:string[] = []
+
+    if(body.max_tokens > 8192){
+        betas.push('output-128k-2025-02-19')
+    }
+
+
+    if(db.claude1HourCaching){
+        betas.push('extended-cache-ttl-2025-04-11')
+    }
+
+    if(betas.length > 0 && !hasCustomAnthropicBeta){
+        headers['anthropic-beta'] = betas.join(',')
+    }
+
     if(arg.previewBody){
         return {
             type: 'success',
@@ -593,7 +628,7 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         }
     }
 
-    if(db.claudeBatching){
+    if(db.claudeBatching && !ollamaCloudAnthropic){
         if(body.stream !== undefined){
             delete body.stream
         }
