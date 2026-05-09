@@ -1,5 +1,6 @@
 set -e
 
+export TRUST_PROXY=1
 export VITE_RISU_LEGAL_CONFIGURED=TRUE
 
 npm install -g pnpm
