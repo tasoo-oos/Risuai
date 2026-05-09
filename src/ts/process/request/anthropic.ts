@@ -568,7 +568,6 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
         delete headers["x-api-key"]
     }
 
-
     if(db.usePlainFetch){
         headers['anthropic-dangerous-direct-browser-access'] = 'true'
     }
