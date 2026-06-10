@@ -603,6 +603,7 @@ export function setDatabase(data:Database){
     data.toggleConfirmRecommendedPreset ??= false
     data.useExperimentalGoogleTranslator ??= false
     data.thinkingType ??= 'budget'
+    data.geminiThinkingLevel ??= 'high'
     data.deepseekThinkingType ??= 'off'
     data.adaptiveThinkingEffort ??= 'high'
     data.deepseekReasoningEffort ??= 'high'
@@ -698,6 +699,7 @@ export function setDatabase(data:Database){
     data.loadouts ??= []
     data.longPressToPopupEditor ??= false
     data.customSidebarItems ??= []
+    data.moveInsteadOfCopyOnCMPConvert ??= false
     changeLanguage(data.language)
     setDatabaseLite(data)
 }
@@ -768,6 +770,16 @@ export interface DynamicOutput {
     dynamicOutputPrompt: boolean
     showTypingEffect: boolean
     dynamicRequest: boolean
+}
+
+export interface RisuPersona {
+    personaPrompt:string
+    name:string
+    icon:string
+    largePortrait?:boolean
+    id?:string
+    note?:string
+    embeddedModule?:RisuModule
 }
 
 export interface Database{
@@ -923,14 +935,7 @@ export interface Database{
     nanogptUseSubscriptionEndpoint:boolean
     openrouterFallback:boolean
     selectedPersona:number
-    personas:{
-        personaPrompt:string
-        name:string
-        icon:string
-        largePortrait?:boolean
-        id?:string
-        note?:string
-    }[]
+    personas:RisuPersona[]
     personaNote:boolean
     assetWidth:number
     animationSpeed:number
@@ -1129,6 +1134,7 @@ export interface Database{
     useExperimentalGoogleTranslator:boolean
     thinkingTokens: number
     thinkingType: 'off' | 'budget' | 'adaptive'
+    geminiThinkingLevel: 'minimal' | 'low' | 'medium' | 'high'
     deepseekThinkingType: 'off' | 'enabled'
     adaptiveThinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
     deepseekReasoningEffort: 'high' | 'max'
@@ -1248,6 +1254,7 @@ export interface Database{
     disableAprilFools?:boolean
     customSidebarItems: CustomSideBarItem[]
     lastLoadedLoadoutName: string
+    moveInsteadOfCopyOnCMPConvert?:boolean
 }
 
 export interface CustomSideBarItem{
@@ -1467,6 +1474,7 @@ export interface character{
     modules?:string[]
     coldstorage?:string
     coldStoragedChats?:string[]
+    customModuleToggle?:string
 }
 
 
@@ -1631,6 +1639,7 @@ export interface botPreset{
     reasonEffort?:number
     thinkingTokens?:number
     thinkingType?: 'off' | 'budget' | 'adaptive'
+    geminiThinkingLevel?: 'minimal' | 'low' | 'medium' | 'high'
     deepseekThinkingType?: 'off' | 'enabled'
     adaptiveThinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
     deepseekReasoningEffort?: 'high' | 'max'
@@ -1985,6 +1994,7 @@ export const presetTemplate:botPreset = {
         mode: 'instruct'
     },
     top_p: 1,
+    geminiThinkingLevel: 'high',
     useInstructPrompt: false,
     verbosity: 1
 }
@@ -2078,6 +2088,7 @@ export function saveCurrentPreset(){
         reasonEffort: db.reasoningEffort ?? 0,
         thinkingTokens: db.thinkingTokens ?? null,
         thinkingType: db.thinkingType ?? 'budget',
+        geminiThinkingLevel: db.geminiThinkingLevel ?? 'high',
         deepseekThinkingType: db.deepseekThinkingType ?? 'off',
         adaptiveThinkingEffort: db.adaptiveThinkingEffort ?? 'high',
         deepseekReasoningEffort: db.deepseekReasoningEffort ?? 'high',
@@ -2202,6 +2213,7 @@ export function setPreset(db:Database, newPres: botPreset){
     db.reasoningEffort = newPres.reasonEffort ?? 0
     db.thinkingTokens = newPres.thinkingTokens ?? null
     db.thinkingType = newPres.thinkingType ?? 'budget'
+    db.geminiThinkingLevel = newPres.geminiThinkingLevel ?? 'high'
     db.deepseekThinkingType = newPres.deepseekThinkingType ?? 'off'
     db.adaptiveThinkingEffort = newPres.adaptiveThinkingEffort ?? 'high'
     db.deepseekReasoningEffort = newPres.deepseekReasoningEffort ?? 'high'
