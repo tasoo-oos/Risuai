@@ -44,6 +44,19 @@ export function setObjectValue<T>(obj: T, key: string, value: any): T {
     return obj
 }
 
+export function deleteObjectValue<T>(obj: T, key: string): T {
+    const splitKey = key.split('.')
+    if (splitKey.length > 1) {
+        const firstKey = splitKey.shift()
+        if (obj[firstKey] && typeof obj[firstKey] === 'object') {
+            obj[firstKey] = deleteObjectValue(obj[firstKey], splitKey.join('.'))
+        }
+    }
+
+    delete obj[key]
+    return obj
+}
+
 export function getAdditionalParameters(aiModel?: string): [string, string][] {
     const db = getDatabase()
 
@@ -91,7 +104,7 @@ export function applyAdditionalParameters<T extends Record<string, any>>(
                 delete headers[key.replace('header::', '')]
             }
             else {
-                delete body[key]
+                body = deleteObjectValue(body, key)
             }
             continue
         }

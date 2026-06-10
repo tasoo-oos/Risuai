@@ -1,10 +1,12 @@
 import { language } from "src/lang"
 import { alertError } from "src/ts/alert"
 import { getDatabase } from "src/ts/storage/database.svelte"
-import { LLMFlags } from "src/ts/model/modellist"
+import { LLMFlags, LLMProvider } from "src/ts/model/modellist"
 import { addFetchLog, fetchNative, globalFetch, textifyReadableStream } from "src/ts/globalApi.svelte"
+import { isNodeServer, isTauri } from "src/ts/platform"
 import { simplifySchema } from "src/ts/util"
 import { NANOGPT_RESPONSES_ENDPOINT, NANOGPT_SUBSCRIPTION_RESPONSES_ENDPOINT } from "src/ts/model/providers/nanogpt"
+import { isLocalNetworkUrl } from "src/ts/network/localNetwork"
 
 import { extractJSON, getOpenAIJSONSchema } from "../../templates/jsonSchema"
 import { callTool, decodeToolCall, encodeToolCall } from "../../mcp/mcp"
@@ -13,6 +15,36 @@ import { applyAdditionalParameters, applyParameters, getAdditionalParameters } f
 
 import type { OpenAIChatExtra, ResponseFunctionCallItem, ResponseInputItem, ResponseItem, ResponseOutputItem } from './types'
 import { getLocalNetworkRequestOptions, type LocalNetworkRequestOptions } from './shared'
+
+function isOfficialOpenAIURL(url: string): boolean {
+    try{
+        return new URL(url).hostname === 'api.openai.com'
+    }
+    catch{
+        return false
+    }
+}
+
+function shouldUseOpenAIFlexProcessing(aiModel: string | undefined, url: string, provider: LLMProvider): boolean {
+    const isCustomEndpoint = aiModel === 'reverse_proxy' || aiModel?.startsWith('xcustom:::')
+    return provider === LLMProvider.OpenAI || (isCustomEndpoint && isOfficialOpenAIURL(url))
+}
+
+function responseAPIErrorToString(data:any):string{
+    if(typeof data === 'string'){
+        return data
+    }
+    if(typeof data?.error?.message === 'string'){
+        return data.error.message
+    }
+    if(typeof data?.error === 'string'){
+        return data.error
+    }
+    if(typeof data?.message === 'string'){
+        return data.message
+    }
+    return JSON.stringify(data) ?? String(data)
+}
 
 function responseTextContentToString(content:any):string{
     if(typeof content === 'string'){
@@ -240,7 +272,7 @@ function buildResponsesHeaders(arg:RequestDataArgumentExtended, risuIdentify:boo
     if(risuIdentify){
         headers["X-Proxy-Risu"] = 'RisuAI'
     }
-    if(aiModel === 'nanogpt' && db.nanogptProvider && !db.nanogptUseSubscriptionEndpoint){
+    if(aiModel === 'nanogpt' && db.nanogptProvider){
         headers["X-Provider"] = db.nanogptProvider
     }
 
@@ -356,7 +388,7 @@ async function buildResponsesBody(arg:RequestDataArgumentExtended):Promise<Recor
     if(arg.aiModel === 'ollama-cloud'){
         delete body.store
     }
-    if(db.jsonSchemaEnabled || arg.schema){
+    if((db.jsonSchemaEnabled || arg.schema) && !arg.modelInfo.flags.includes(LLMFlags.noStructuredOutput)){
         body.text ??= {}
         body.text.format = {
             type: 'json_schema',
@@ -528,13 +560,13 @@ async function requestHTTPResponsesAPI(requestURL:string, body:any, headers:Reco
     if(!response.ok){
         return {
             type: 'fail',
-            result: (language.errors.httpError + `${JSON.stringify(response.data)}`)
+            result: (language.errors.httpError + responseAPIErrorToString(response.data))
         }
     }
 
     const data = response.data as any
     if(data?.status === 'failed' || data?.error){
-        return { type: 'fail', result: JSON.stringify(data.error ?? data) }
+        return { type: 'fail', result: responseAPIErrorToString(data.error ?? data) }
     }
     if(data?.status === 'incomplete'){
         const result = extractResponsesText(data, arg)
@@ -562,6 +594,10 @@ async function requestHTTPResponsesAPI(requestURL:string, body:any, headers:Reco
         if(resRec.type === 'success'){
             return { type: 'success', result: prefix ? prefix + '\n\n' + resRec.result : resRec.result }
         }
+        if(prefix){
+            alertError(`Failed to fetch model response after tool execution`)
+            return { type: 'success', result: prefix }
+        }
         return resRec
     }
 
@@ -582,6 +618,7 @@ function getResponsesTranStream(arg:RequestDataArgumentExtended):TransformStream
     let reasoning = ''
     let error = ''
     const calls:Record<string, ResponseFunctionCallItem> = {}
+    let lastResponseOutput:ResponseItem[] = []
 
     const appendReasoning = (incoming?:string) => {
         if(!incoming){
@@ -607,6 +644,9 @@ function getResponsesTranStream(arg:RequestDataArgumentExtended):TransformStream
         const chunk:Record<string,string> = { "0": error || result }
         if(Object.keys(calls).length > 0){
             chunk["__tool_calls"] = JSON.stringify(calls)
+        }
+        if(lastResponseOutput.length > 0){
+            chunk["__response_output"] = JSON.stringify(lastResponseOutput)
         }
         controller.enqueue(chunk)
     }
@@ -645,9 +685,10 @@ function getResponsesTranStream(arg:RequestDataArgumentExtended):TransformStream
             }
         }
         else if(type === 'response.failed' || type === 'response.error' || type === 'error'){
-            error = JSON.stringify(event.error ?? event)
+            error = responseAPIErrorToString(event.error ?? event)
         }
         else if(type === 'response.completed'){
+            const responseCalls = extractResponsesFunctionCalls(event.response)
             const finalText = extractResponsesText(event.response, arg)
             if(finalText){
                 text = finalText
@@ -655,7 +696,12 @@ function getResponsesTranStream(arg:RequestDataArgumentExtended):TransformStream
                     reasoning = ''
                 }
             }
-            for(const call of extractResponsesFunctionCalls(event.response)){
+            lastResponseOutput = responseCalls.length > 0
+                ? (event.response?.output ?? [])
+                    .map((item:any) => sanitizeResponsesContinuationItem(item))
+                    .filter((item:any): item is ResponseItem => !!item)
+                : []
+            for(const call of responseCalls){
                 calls[call.call_id] = call
             }
         }
@@ -738,13 +784,16 @@ function wrapResponsesToolStream(stream:ReadableStream<StreamResponseChunk>, bod
                     return
                 }
 
-                body.__lastOutput = calls.map((call) => ({
-                    type: 'function_call',
-                    call_id: call.call_id,
-                    name: call.name,
-                    arguments: call.arguments,
-                    status: 'completed'
-                }))
+                const responseOutput = JSON.parse(lastValue?.["__response_output"] || '[]') as ResponseItem[]
+                body.__lastOutput = responseOutput.length > 0
+                    ? responseOutput
+                    : calls.map((call) => ({
+                        type: 'function_call',
+                        call_id: call.call_id,
+                        name: call.name,
+                        arguments: call.arguments,
+                        status: 'completed'
+                    }))
                 const callPrefix = await appendResponsesToolOutputs(body, calls, arg, lastValue?.["0"] ?? '')
                 delete body.__lastOutput
                 prefix += (prefix && callPrefix ? '\n\n' : '') + callPrefix
@@ -800,15 +849,21 @@ export async function requestOpenAIResponseAPI(arg:RequestDataArgumentExtended):
     const { requestURL, risuIdentify } = getResponsesRequestURL(arg)
     const headers = buildResponsesHeaders(arg, risuIdentify)
 
-    if(aiModel === 'reverse_proxy' || aiModel?.startsWith('xcustom:::')){
-        body = applyAdditionalParameters(body, headers, getAdditionalParameters(aiModel))
+    if(db.openAIFlexProcessing && shouldUseOpenAIFlexProcessing(aiModel, requestURL, arg.modelInfo.provider)){
+        body.service_tier = 'flex'
     }
+    body = applyAdditionalParameters(body, headers, getAdditionalParameters(aiModel))
+
     if(!arg.useStreaming){
         body.stream = false
     }
 
     const localNetworkOptions = getLocalNetworkRequestOptions(requestURL, db, false)
     const streamingLocalNetworkOptions = getLocalNetworkRequestOptions(requestURL, db, true)
+
+    if(arg.useStreaming){
+        body.stream = true
+    }
 
     if(arg.previewBody){
         return {
@@ -822,7 +877,13 @@ export async function requestOpenAIResponseAPI(arg:RequestDataArgumentExtended):
     }
 
     if(arg.useStreaming){
-        body.stream = true
+        if(isLocalNetworkUrl(requestURL) && !isTauri && !isNodeServer){
+            return {
+                type: 'fail',
+                result: 'You are trying local request on streaming. this is not allowed dude to browser/os security policy. turn off streaming.',
+            }
+        }
+
         const response = await fetchNative(requestURL, {
             body: JSON.stringify(toExternalResponsesBody(body)),
             method: "POST",
